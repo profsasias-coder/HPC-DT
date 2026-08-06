@@ -1,0 +1,4 @@
+/data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/datos_experimento/vibracion_saludable_20260804_194239.csv
+/data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/datos_experimento/vibracion_desgaste_rodamiento_20260804_194240.csv
+/data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/datos_experimento/vibracion_desbalanceo_20260804_194240.csv
+/data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/datos_experimento/vibracion_falla_engranaje_20260804_194240.csv

@@ -1,0 +1,20 @@
+c/
+├── Makefile
+├── solver.h
+├── solver.c
+├── familias.h
+├── familias_fisicas.c
+├── familias_matematicas.c
+├── optimizador.h
+├── optimizador.c
+├── io.h
+├── io.c
+├── descubridor_c.c
+├── validar_resultados.py
+└── datos_ejemplo/          (para pruebas)
+    └── vibracion_*.csv
+
+
+
+Instalar:
+sudo apt install libjson-c-dev

@@ -1,0 +1,42 @@
+======================================================================
+RESULTADOS POR ARCHIVO
+======================================================================
+
+
+vibracion_saludable_20260805_105458.csv:
+  MEJOR FAMILIA: Oscilador_Duffing
+  ERROR: 2.9527e-09
+  ECUACION:
+    d2x/dt2 + 2*0.0563*15.7229*dx/dt + 15.7229^2*x + 9.1887*x^3 = F(t)
+
+vibracion_falla_engranaje_20260805_105459.csv:
+  MEJOR FAMILIA: Oscilador_Simple
+  ERROR: 2.1776e-09
+  ECUACION:
+    d2x/dt2 + 2*0.0488*15.6979*dx/dt + 15.6979^2*x = F(t)
+
+vibracion_desgaste_rodamiento_20260805_105459.csv:
+  MEJOR FAMILIA: Oscilador_Duffing
+  ERROR: 2.6708e-10
+  ECUACION:
+    d2x/dt2 + 2*0.0884*15.6750*dx/dt + 15.6750^2*x + 1.2312*x^3 = F(t)
+
+vibracion_desbalanceo_20260805_105459.csv:
+  MEJOR FAMILIA: Oscilador_Simple
+  ERROR: 2.7967e-10
+  ECUACION:
+    d2x/dt2 + 2*0.0512*15.7167*dx/dt + 15.7167^2*x = F(t)
+
+======================================================================
+GRAFICOS GENERADOS
+======================================================================
+  /data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/salidas/2026-08-05-10-54/02-resultados/10_procesos/graficos/comparacion_saludable_0.0_20260805_110916.png
+  /data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/salidas/2026-08-05-10-54/02-resultados/10_procesos/graficos/comparacion_falla_engranaje_0.5_20260805_110917.png
+  /data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/salidas/2026-08-05-10-54/02-resultados/10_procesos/graficos/comparacion_desgaste_rodamiento_0.5_20260805_110917.png
+  /data/Local/UTEC/ACTIVIDAD-GENERAL/Universidades/UdelaR/Doctorado/2026/HPC/src/Pruebas/02-Paralelo/01-Aerogenerador/Fallas/fast/mejorado/fase-2/salidas/2026-08-05-10-54/02-resultados/10_procesos/graficos/comparacion_desbalanceo_0.5_20260805_110918.png
+
+======================================================================
+TIEMPOS DE EJECUCION
+======================================================================
+Tiempo total: 89.27 s
+Procesos MPI: 10

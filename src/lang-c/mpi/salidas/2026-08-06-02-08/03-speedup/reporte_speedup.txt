@@ -1,0 +1,28 @@
+======================================================================
+REPORTE DE SPEEDUP
+Fecha: 2026-08-06 02:08:10
+======================================================================
+
+CONFIGURACIÓN:
+  Binario: ./descubridor_c
+  Procesos: [1, 2, 4, 8, 10, 12, 16]
+  Repeticiones: 10
+
+RESULTADOS:
+----------------------------------------
+  1 procesos: tiempo=0.35s, speedup=1.00x (fuente: maestro)
+  2 procesos: tiempo=0.34s, speedup=1.01x (fuente: maestro)
+  4 procesos: tiempo=0.12s, speedup=2.80x (fuente: maestro)
+  8 procesos: tiempo=0.07s, speedup=5.38x (fuente: maestro)
+  10 procesos: tiempo=0.10s, speedup=3.52x (fuente: wall-clock)
+  12 procesos: tiempo=0.10s, speedup=3.43x (fuente: wall-clock)
+  16 procesos: tiempo=0.10s, speedup=3.42x (fuente: wall-clock)
+
+----------------------------------------
+Fracción paralelizable (Amdahl, ajustada con 1,2,4,8): fp = 0.9220
+Speedup máximo teórico (Amdahl, sin overhead de comunicación): 12.82x
+Speedup máximo real alcanzado: 5.38x (con 8 procesos)
+
+NOTA: La caída del speedup después de 8 procesos se debe al overhead de comunicación y contención de recursos, que no está contemplado por la ley de Amdahl.
+
+======================================================================

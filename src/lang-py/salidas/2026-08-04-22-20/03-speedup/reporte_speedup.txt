@@ -1,0 +1,26 @@
+======================================================================
+REPORTE EXPERIMENTO MEJORADO
+Fecha: 2026-08-04 22:37:38
+======================================================================
+
+CONFIGURACION:
+  maxiter: 8, popsize: 6
+  familias: todas
+  timeout: 3600s
+  archivos: 4
+
+TIEMPOS:
+  1 procesos: 505.34s
+  4 procesos: 182.75s
+  8 procesos: 105.23s
+  10 procesos: 107.09s
+  12 procesos: 117.55s
+
+SPEEDUP:
+  1 proceso: 1.00x
+  4 procesos: 2.77x
+  8 procesos: 4.80x
+  10 procesos: 4.72x
+  12 procesos: 4.30x
+
+======================================================================
