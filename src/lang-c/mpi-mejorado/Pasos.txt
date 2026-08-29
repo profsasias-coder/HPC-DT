@@ -1,0 +1,8 @@
+1. Generar los 64 archivos de datos
+python3 S1-generador_vibraciones_fallas.py --output_dir ./datos_ejemplo --num_archivos 512
+
+python3 S1-generador_vibraciones_fallas.py --output_dir ./datos_pesados --num_archivos 64 --t_total 10.0 --dt 0.0005
+
+
+2. Ejecutar el descubridor (con 1 proceso para prueba)
+mpirun -np 1 ./descubridor_c

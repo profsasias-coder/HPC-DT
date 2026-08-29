@@ -1,0 +1,870 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <time.h>
+#include <math.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <mpi.h>
+#include "solver.h"
+#include "familias.h"
+#include "optimizador.h"
+#include "io.h"
+#include "utils.h"
+
+// ============================================================
+// Configuracion
+// ============================================================
+typedef struct {
+    char *input_dir;
+    char *output_base;
+    char *familias_tipo;
+    int maxiter;
+    int popsize;
+} Config;
+
+// ============================================================
+// Estructuras para comunicacion MPI (BLOQUES)
+// ============================================================
+#define MAX_FILENAME 512
+#define MAX_FAMILIA_NAME 64
+#define MAX_ARCHIVOS_POR_BLOQUE 128
+
+typedef struct {
+    int num_archivos;
+    char archivos[MAX_ARCHIVOS_POR_BLOQUE][MAX_FILENAME];
+} TaskBlock;
+
+typedef struct {
+    char filename[MAX_FILENAME];
+    double error;
+    int num_params;
+    double params[30];
+    char familia_nombre[MAX_FAMILIA_NAME];
+} Result;
+
+// ============================================================
+// Funcion objetivo para el optimizador
+// ============================================================
+typedef struct {
+    Familia *familia;
+    double *t;
+    double *x_real;
+    double *F;
+    int n;
+} UserData;
+
+static double funcion_objetivo_wrapper(double *params, void *user_data) {
+    UserData *data = (UserData*)user_data;
+    return data->familia->evaluar(params, data->t, data->x_real, data->F, data->n);
+}
+
+// ============================================================
+// Generar ecuacion en texto
+// ============================================================
+static void generar_ecuacion_texto(char *buffer, size_t size, const char *nombre,
+                                   double *params, int num_params) {
+    char eq[4096] = "";
+    
+    if (strcmp(nombre, "Oscilador_Simple") == 0 && num_params >= 2) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*x = F(t)",
+                 params[1], params[0], params[0]);
+    }
+    else if (strcmp(nombre, "Oscilador_Duffing") == 0 && num_params >= 3) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*x + %.4f*x^3 = F(t)",
+                 params[1], params[0], params[0], params[2]);
+    }
+    else if (strcmp(nombre, "Amortiguamiento_NoLineal") == 0 && num_params >= 3) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*x + %.4f*(dx/dt)^3 = F(t)",
+                 params[1], params[0], params[0], params[2]);
+    }
+    else if (strcmp(nombre, "Forzamiento_Parametrico") == 0 && num_params >= 4) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*(1 + %.4f*sin(%.4f*t))*x = F(t)",
+                 params[1], params[0], params[0], params[2], params[3]);
+    }
+    else if (strcmp(nombre, "Impacto") == 0 && num_params >= 4) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*x + F_impacto(x) = F(t)  (gap=%.4f, k=%.4f)",
+                 params[1], params[0], params[0], params[2], params[3]);
+    }
+    else if (strcmp(nombre, "Oscilador_Amortiguamiento_Cuadratico") == 0 && num_params >= 3) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*x + %.4f*(dx/dt)^2 = F(t)",
+                 params[1], params[0], params[0], params[2]);
+    }
+    else if (strcmp(nombre, "Resorte_Asimetrico") == 0 && num_params >= 4) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*x + %.4f*x^2 + %.4f*x^3 = F(t)",
+                 params[1], params[0], params[0], params[2], params[3]);
+    }
+    else if (strcmp(nombre, "Impacto_Histeresis") == 0 && num_params >= 5) {
+        snprintf(eq, sizeof(eq), "d2x/dt2 + 2*%.4f*%.4f*dx/dt + %.4f^2*x + F_impacto_hist(x,dx/dt) = F(t)  (gap=%.4f, k=%.4f, delta=%.4f)",
+                 params[1], params[0], params[0], params[2], params[3], params[4]);
+    }
+    else if (strcmp(nombre, "Polinomica_grado2") == 0 && num_params >= 7) {
+        snprintf(eq, sizeof(eq), "d2x = a0 + a1*x + a2*x^2 + b0*dx + b1*dx^2 + b2*dx^3 + c*F  [a=(%.2f,%.2f,%.2f) b=(%.2f,%.2f,%.2f) c=%.2f]",
+                 params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
+    }
+    else if (strcmp(nombre, "Polinomica_grado3") == 0 && num_params >= 9) {
+        snprintf(eq, sizeof(eq), "d2x = a0 + a1*x + a2*x^2 + a3*x^3 + b0*dx + b1*dx^2 + b2*dx^3 + b3*dx^4 + c*F  [a=(%.2f,%.2f,%.2f,%.2f) b=(%.2f,%.2f,%.2f,%.2f) c=%.2f]",
+                 params[0], params[1], params[2], params[3],
+                 params[4], params[5], params[6], params[7], params[8]);
+    }
+    else if (strcmp(nombre, "Polinomica_grado4") == 0 && num_params >= 11) {
+        snprintf(eq, sizeof(eq), "d2x = a0+a1*x+a2*x^2+a3*x^3+a4*x^4 + b0*dx+b1*dx^2+b2*dx^3+b3*dx^4+b4*dx^5 + c*F  [a=(%.2f,%.2f,%.2f,%.2f,%.2f) b=(%.2f,%.2f,%.2f,%.2f,%.2f) c=%.2f]",
+                 params[0], params[1], params[2], params[3], params[4],
+                 params[5], params[6], params[7], params[8], params[9], params[10]);
+    }
+    else if (strcmp(nombre, "Fourier_2") == 0 && num_params >= 6) {
+        snprintf(eq, sizeof(eq), "d2x = a1*cos(wt)+a2*cos(2wt)+b1*sin(wt)+b2*sin(2wt)+c*F  [a=(%.2f,%.2f) b=(%.2f,%.2f) w=%.2f c=%.2f]",
+                 params[0], params[1], params[2], params[3], params[4], params[5]);
+    }
+    else if (strcmp(nombre, "Fourier_3") == 0 && num_params >= 8) {
+        snprintf(eq, sizeof(eq), "d2x = a1*cos(wt)+a2*cos(2wt)+a3*cos(3wt)+b1*sin(wt)+b2*sin(2wt)+b3*sin(3wt)+c*F  [a=(%.2f,%.2f,%.2f) b=(%.2f,%.2f,%.2f) w=%.2f c=%.2f]",
+                 params[0], params[1], params[2],
+                 params[3], params[4], params[5], params[6], params[7]);
+    }
+    else if (strcmp(nombre, "Fourier_4") == 0 && num_params >= 10) {
+        snprintf(eq, sizeof(eq), "d2x = a1*cos(wt)+a2*cos(2wt)+a3*cos(3wt)+a4*cos(4wt)+b1*sin(wt)+b2*sin(2wt)+b3*sin(3wt)+b4*sin(4wt)+c*F  [a=(%.2f,%.2f,%.2f,%.2f) b=(%.2f,%.2f,%.2f,%.2f) w=%.2f c=%.2f]",
+                 params[0], params[1], params[2], params[3],
+                 params[4], params[5], params[6], params[7], params[8], params[9]);
+    }
+    else if (strcmp(nombre, "Exponencial") == 0 && num_params >= 4) {
+        snprintf(eq, sizeof(eq), "d2x = A*exp(alpha*x) + beta*dx + gamma*F  [A=%.2f alpha=%.2f beta=%.2f gamma=%.2f]",
+                 params[0], params[1], params[2], params[3]);
+    }
+    else {
+        snprintf(eq, sizeof(eq), "Ecuacion no disponible para %s", nombre);
+    }
+    
+    strncpy(buffer, eq, size - 1);
+    buffer[size - 1] = '\0';
+}
+
+// ============================================================
+// Crear lista de familias
+// ============================================================
+int crear_familias(const char *tipo, Familia **familias_out) {
+    static double bounds_osc[4] = {5.0, 0.001, 50.0, 0.5};
+    static double bounds_duffing[6] = {5.0, 0.001, -10.0, 50.0, 0.5, 10.0};
+    static double bounds_amort[6] = {5.0, 0.001, -10.0, 50.0, 0.5, 10.0};
+    static double bounds_forz[8] = {5.0, 0.001, 0.0, 0.1, 50.0, 0.5, 1.0, 10.0};
+    static double bounds_impacto[8] = {5.0, 0.001, 0.001, 10.0, 50.0, 0.5, 1.0, 1000.0};
+    static double bounds_amort_cuad[6] = {5.0, 0.001, -10.0, 50.0, 0.5, 10.0};
+    static double bounds_resorte_asim[8] = {5.0, 0.001, -10.0, -10.0, 50.0, 0.5, 10.0, 10.0};
+    static double bounds_impacto_histeresis[10] = {5.0, 0.001, 0.001, 10.0, 0.001, 50.0, 0.5, 1.0, 1000.0, 0.1};
+
+    static Familia familias[15];
+    int count = 0;
+
+    if (strcmp(tipo, "fisicas") == 0 || strcmp(tipo, "todas") == 0) {
+        familias[count].nombre = "Oscilador_Simple";
+        familias[count].num_params = 2;
+        familias[count].bounds_min = bounds_osc;
+        familias[count].bounds_max = bounds_osc + 2;
+        familias[count].evaluar = evaluar_oscilador_simple;
+        familias[count].simular = simular_oscilador_simple;
+        familias[count].tipo = 0;
+        count++;
+
+        familias[count].nombre = "Oscilador_Duffing";
+        familias[count].num_params = 3;
+        familias[count].bounds_min = bounds_duffing;
+        familias[count].bounds_max = bounds_duffing + 3;
+        familias[count].evaluar = evaluar_oscilador_duffing;
+        familias[count].simular = simular_oscilador_duffing;
+        familias[count].tipo = 0;
+        count++;
+
+        familias[count].nombre = "Amortiguamiento_NoLineal";
+        familias[count].num_params = 3;
+        familias[count].bounds_min = bounds_amort;
+        familias[count].bounds_max = bounds_amort + 3;
+        familias[count].evaluar = evaluar_amortiguamiento_nolineal;
+        familias[count].simular = simular_amortiguamiento_nolineal;
+        familias[count].tipo = 0;
+        count++;
+
+        familias[count].nombre = "Forzamiento_Parametrico";
+        familias[count].num_params = 4;
+        familias[count].bounds_min = bounds_forz;
+        familias[count].bounds_max = bounds_forz + 4;
+        familias[count].evaluar = evaluar_forzamiento_parametrico;
+        familias[count].simular = simular_forzamiento_parametrico;
+        familias[count].tipo = 0;
+        count++;
+
+        familias[count].nombre = "Impacto";
+        familias[count].num_params = 4;
+        familias[count].bounds_min = bounds_impacto;
+        familias[count].bounds_max = bounds_impacto + 4;
+        familias[count].evaluar = evaluar_impacto;
+        familias[count].simular = simular_impacto;
+        familias[count].tipo = 0;
+        count++;
+
+        familias[count].nombre = "Oscilador_Amortiguamiento_Cuadratico";
+        familias[count].num_params = 3;
+        familias[count].bounds_min = bounds_amort_cuad;
+        familias[count].bounds_max = bounds_amort_cuad + 3;
+        familias[count].evaluar = evaluar_oscilador_amortiguamiento_cuadratico;
+        familias[count].simular = simular_oscilador_amortiguamiento_cuadratico;
+        familias[count].tipo = 0;
+        count++;
+
+        familias[count].nombre = "Resorte_Asimetrico";
+        familias[count].num_params = 4;
+        familias[count].bounds_min = bounds_resorte_asim;
+        familias[count].bounds_max = bounds_resorte_asim + 4;
+        familias[count].evaluar = evaluar_resorte_asimetrico;
+        familias[count].simular = simular_resorte_asimetrico;
+        familias[count].tipo = 0;
+        count++;
+
+        familias[count].nombre = "Impacto_Histeresis";
+        familias[count].num_params = 5;
+        familias[count].bounds_min = bounds_impacto_histeresis;
+        familias[count].bounds_max = bounds_impacto_histeresis + 5;
+        familias[count].evaluar = evaluar_impacto_histeresis;
+        familias[count].simular = simular_impacto_histeresis;
+        familias[count].tipo = 0;
+        count++;
+    }
+
+    if (strcmp(tipo, "matematicas") == 0 || strcmp(tipo, "todas") == 0) {
+        static double bounds_poli2_min[7], bounds_poli2_max[7];
+        for (int i = 0; i < 7; i++) { bounds_poli2_min[i] = -100.0; bounds_poli2_max[i] = 100.0; }
+        familias[count].nombre = "Polinomica_grado2";
+        familias[count].num_params = 7;
+        familias[count].bounds_min = bounds_poli2_min;
+        familias[count].bounds_max = bounds_poli2_max;
+        count++;
+
+        static double bounds_poli3_min[9], bounds_poli3_max[9];
+        for (int i = 0; i < 9; i++) { bounds_poli3_min[i] = -100.0; bounds_poli3_max[i] = 100.0; }
+        familias[count].nombre = "Polinomica_grado3";
+        familias[count].num_params = 9;
+        familias[count].bounds_min = bounds_poli3_min;
+        familias[count].bounds_max = bounds_poli3_max;
+        count++;
+
+        static double bounds_poli4_min[11], bounds_poli4_max[11];
+        for (int i = 0; i < 11; i++) { bounds_poli4_min[i] = -100.0; bounds_poli4_max[i] = 100.0; }
+        familias[count].nombre = "Polinomica_grado4";
+        familias[count].num_params = 11;
+        familias[count].bounds_min = bounds_poli4_min;
+        familias[count].bounds_max = bounds_poli4_max;
+        count++;
+
+        static double bounds_fourier2_min[6], bounds_fourier2_max[6];
+        for (int i = 0; i < 6; i++) {
+            if (i == 4) { bounds_fourier2_min[i] = 0.1; bounds_fourier2_max[i] = 50.0; }
+            else { bounds_fourier2_min[i] = -100.0; bounds_fourier2_max[i] = 100.0; }
+        }
+        familias[count].nombre = "Fourier_2";
+        familias[count].num_params = 6;
+        familias[count].bounds_min = bounds_fourier2_min;
+        familias[count].bounds_max = bounds_fourier2_max;
+        count++;
+
+        static double bounds_fourier3_min[8], bounds_fourier3_max[8];
+        for (int i = 0; i < 8; i++) {
+            if (i == 6) { bounds_fourier3_min[i] = 0.1; bounds_fourier3_max[i] = 50.0; }
+            else { bounds_fourier3_min[i] = -100.0; bounds_fourier3_max[i] = 100.0; }
+        }
+        familias[count].nombre = "Fourier_3";
+        familias[count].num_params = 8;
+        familias[count].bounds_min = bounds_fourier3_min;
+        familias[count].bounds_max = bounds_fourier3_max;
+        count++;
+
+        static double bounds_fourier4_min[10], bounds_fourier4_max[10];
+        for (int i = 0; i < 10; i++) {
+            if (i == 8) { bounds_fourier4_min[i] = 0.1; bounds_fourier4_max[i] = 50.0; }
+            else { bounds_fourier4_min[i] = -100.0; bounds_fourier4_max[i] = 100.0; }
+        }
+        familias[count].nombre = "Fourier_4";
+        familias[count].num_params = 10;
+        familias[count].bounds_min = bounds_fourier4_min;
+        familias[count].bounds_max = bounds_fourier4_max;
+        count++;
+
+        static double bounds_exp_min[4], bounds_exp_max[4];
+        for (int i = 0; i < 4; i++) {
+            bounds_exp_min[i] = -100.0;
+            bounds_exp_max[i] = 100.0;
+        }
+        familias[count].nombre = "Exponencial";
+        familias[count].num_params = 4;
+        familias[count].bounds_min = bounds_exp_min;
+        familias[count].bounds_max = bounds_exp_max;
+        count++;
+    }
+
+    *familias_out = familias;
+    return count;
+}
+
+// ============================================================
+// Wrappers para familias matematicas
+// ============================================================
+static double evaluar_poli_wrapper_grado2(double *params, double *t, double *x_real, double *F, int n) {
+    return evaluar_polinomica(params, 2, t, x_real, F, n);
+}
+static double evaluar_poli_wrapper_grado3(double *params, double *t, double *x_real, double *F, int n) {
+    return evaluar_polinomica(params, 3, t, x_real, F, n);
+}
+static double evaluar_poli_wrapper_grado4(double *params, double *t, double *x_real, double *F, int n) {
+    return evaluar_polinomica(params, 4, t, x_real, F, n);
+}
+static double evaluar_fourier_wrapper_2(double *params, double *t, double *x_real, double *F, int n) {
+    return evaluar_fourier(params, 2, t, x_real, F, n);
+}
+static double evaluar_fourier_wrapper_3(double *params, double *t, double *x_real, double *F, int n) {
+    return evaluar_fourier(params, 3, t, x_real, F, n);
+}
+static double evaluar_fourier_wrapper_4(double *params, double *t, double *x_real, double *F, int n) {
+    return evaluar_fourier(params, 4, t, x_real, F, n);
+}
+static double evaluar_exponencial_wrapper(double *params, double *t, double *x_real, double *F, int n) {
+    return evaluar_exponencial(params, t, x_real, F, n);
+}
+
+// ============================================================
+// Funcion para crear directorio
+// ============================================================
+static void crear_directorio(const char *path) {
+    char tmp[512];
+    char *p = NULL;
+    size_t len;
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    len = strlen(tmp);
+    if (tmp[len - 1] == '/') tmp[len - 1] = 0;
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            mkdir(tmp, 0777);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0777);
+}
+
+// ============================================================
+// Datos de un archivo
+// ============================================================
+typedef struct {
+    char filename[MAX_FILENAME];
+    double *t;
+    double *x;
+    double *F;
+    int n;
+} ArchivoDatos;
+
+// ============================================================
+// Procesamiento de un archivo completo
+// ============================================================
+Result procesar_archivo_completo(const char *filename, Familia *familias, int num_familias, int maxiter, int popsize) {
+    Result mejor_res;
+    memset(&mejor_res, 0, sizeof(Result));
+    mejor_res.error = 1e9;
+    
+    const char *base = strrchr(filename, '/');
+    if (base) base++; else base = filename;
+    strcpy(mejor_res.filename, base);
+
+    DatosArchivo *datos = leer_csv(filename);
+    if (!datos) {
+        strcpy(mejor_res.familia_nombre, "ERROR_LECTURA");
+        return mejor_res;
+    }
+
+    for (int f = 0; f < num_familias; f++) {
+        Familia *fam = &familias[f];
+        if (!fam->evaluar) continue;
+
+        EvolucionDiferencial ed;
+        ed.maxiter = maxiter;
+        ed.popsize = popsize;
+        ed.num_params = fam->num_params;
+        ed.bounds_min = fam->bounds_min;
+        ed.bounds_max = fam->bounds_max;
+
+        UserData ud = {fam, datos->t, datos->x, datos->F, datos->n};
+        ed.funcion_objetivo = funcion_objetivo_wrapper;
+        ed.user_data = &ud;
+
+        double error;
+        double *params = evolucion_diferencial(&ed, &error);
+
+        if (error < mejor_res.error) {
+            mejor_res.error = error;
+            mejor_res.num_params = fam->num_params;
+            if (params) {
+                for (int i = 0; i < fam->num_params && i < 30; i++) {
+                    mejor_res.params[i] = params[i];
+                }
+            }
+            strncpy(mejor_res.familia_nombre, fam->nombre, MAX_FAMILIA_NAME - 1);
+            mejor_res.familia_nombre[MAX_FAMILIA_NAME - 1] = '\0';
+        }
+        if (params) free(params);
+    }
+
+    liberar_datos(datos);
+    return mejor_res;
+}
+
+// ============================================================
+// MAIN
+// ============================================================
+int main(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    Config config;
+    config.input_dir = "./datos_pesados";
+    config.output_base = "./salidas";
+    config.familias_tipo = "todas";
+    config.maxiter = 30;
+    config.popsize = 12;
+
+    char output_dir[512], json_dir[512], graficos_dir[512];
+    if (rank == 0) {
+        time_t rawtime;
+        struct tm *timeinfo;
+        char timestamp[80];
+        time(&rawtime);
+        timeinfo = localtime(&rawtime);
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d-%H-%M", timeinfo);
+        snprintf(output_dir, sizeof(output_dir), "%s/%s", config.output_base, timestamp);
+        crear_directorio(output_dir);
+        snprintf(json_dir, sizeof(json_dir), "%s/01-json", output_dir);
+        snprintf(graficos_dir, sizeof(graficos_dir), "%s/02-graficos", output_dir);
+        crear_directorio(json_dir);
+        crear_directorio(graficos_dir);
+
+        print_step("=== DESCUBRIDOR EN C CON MPI ===");
+        print_step("Directorio entrada: %s", config.input_dir);
+        print_step("Directorio salida: %s", output_dir);
+        print_step("Familias: %s, maxiter: %d, popsize: %d", config.familias_tipo, config.maxiter, config.popsize);
+        print_step("Procesos MPI: %d", size);
+    }
+
+    Familia *familias = NULL;
+    int num_familias = crear_familias(config.familias_tipo, &familias);
+    for (int i = 0; i < num_familias; i++) {
+        if (strcmp(familias[i].nombre, "Polinomica_grado2") == 0) {
+            familias[i].evaluar = evaluar_poli_wrapper_grado2;
+        } else if (strcmp(familias[i].nombre, "Polinomica_grado3") == 0) {
+            familias[i].evaluar = evaluar_poli_wrapper_grado3;
+        } else if (strcmp(familias[i].nombre, "Polinomica_grado4") == 0) {
+            familias[i].evaluar = evaluar_poli_wrapper_grado4;
+        } else if (strcmp(familias[i].nombre, "Fourier_2") == 0) {
+            familias[i].evaluar = evaluar_fourier_wrapper_2;
+        } else if (strcmp(familias[i].nombre, "Fourier_3") == 0) {
+            familias[i].evaluar = evaluar_fourier_wrapper_3;
+        } else if (strcmp(familias[i].nombre, "Fourier_4") == 0) {
+            familias[i].evaluar = evaluar_fourier_wrapper_4;
+        } else if (strcmp(familias[i].nombre, "Exponencial") == 0) {
+            familias[i].evaluar = evaluar_exponencial_wrapper;
+        }
+    }
+
+    if (rank == 0) {
+        // ============================================================
+        // MAESTRO
+        // ============================================================
+        DIR *dir = opendir(config.input_dir);
+        if (!dir) {
+            print_step("ERROR: No se puede abrir el directorio %s", config.input_dir);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        struct dirent *entry;
+        char archivos[128][MAX_FILENAME];
+        int num_archivos = 0;
+        while ((entry = readdir(dir)) != NULL) {
+            if (strstr(entry->d_name, ".csv")) {
+                strcpy(archivos[num_archivos], entry->d_name);
+                num_archivos++;
+            }
+        }
+        closedir(dir);
+
+        if (num_archivos == 0) {
+            print_step("ERROR: No se encontraron archivos .csv en %s", config.input_dir);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+        print_step("Archivos encontrados: %d", num_archivos);
+        print_step("Familias cargadas: %d", num_familias);
+
+        ArchivoDatos *archivos_datos = (ArchivoDatos*)malloc(num_archivos * sizeof(ArchivoDatos));
+        for (int a = 0; a < num_archivos; a++) {
+            strcpy(archivos_datos[a].filename, archivos[a]);
+            char path[512];
+            snprintf(path, sizeof(path), "%s/%s", config.input_dir, archivos[a]);
+            DatosArchivo *datos = leer_csv(path);
+            if (!datos) {
+                print_step("ERROR: No se pudo leer %s", archivos[a]);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            archivos_datos[a].t = datos->t;
+            archivos_datos[a].x = datos->x;
+            archivos_datos[a].F = datos->F;
+            archivos_datos[a].n = datos->n;
+            free(datos);
+        }
+
+        typedef struct {
+            double best_error;
+            double best_params[30];
+            int best_num_params;
+            char best_familia[MAX_FAMILIA_NAME];
+            char ecuacion[4096];
+        } MejorPorArchivo;
+
+        MejorPorArchivo *mejores = (MejorPorArchivo*)malloc(num_archivos * sizeof(MejorPorArchivo));
+        for (int a = 0; a < num_archivos; a++) {
+            mejores[a].best_error = 1e9;
+            mejores[a].best_num_params = 0;
+            strcpy(mejores[a].best_familia, "");
+        }
+
+        double **errores_por_archivo = (double**)malloc(num_archivos * sizeof(double*));
+        for (int a = 0; a < num_archivos; a++) {
+            errores_por_archivo[a] = (double*)malloc(num_familias * sizeof(double));
+            for (int f = 0; f < num_familias; f++) {
+                errores_por_archivo[a][f] = 1e9;
+            }
+        }
+
+        // ============================================================
+        // MODO A (1): MAESTRO TRABAJADOR (reparte trabajo entre TODOS los procesos)
+        // EL CAMBIO ESTÁ AQUÍ: El maestro procesa archivos junto con los workers
+        // ============================================================
+        #define MODO_A  1   // <--- CAMBIA A 0 PARA MODO B (MAESTRO DEDICADO)
+        // ============================================================
+
+        if (size == 1) {
+            // ---- MODO SECUENCIAL (1 proceso) ----
+            print_step(">>> EJECUTANDO EN MODO SECUENCIAL (1 PROCESO) <<<\n");
+            double tiempo_inicio = MPI_Wtime();
+
+            for (int a = 0; a < num_archivos; a++) {
+                print_step("Procesando archivo %d/%d: %s", a+1, num_archivos, archivos_datos[a].filename);
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%s", config.input_dir, archivos_datos[a].filename);
+                Result res = procesar_archivo_completo(path, familias, num_familias, config.maxiter, config.popsize);
+                
+                if (res.error < mejores[a].best_error) {
+                    mejores[a].best_error = res.error;
+                    mejores[a].best_num_params = res.num_params;
+                    for (int i = 0; i < res.num_params && i < 30; i++) {
+                        mejores[a].best_params[i] = res.params[i];
+                    }
+                    strcpy(mejores[a].best_familia, res.familia_nombre);
+                    generar_ecuacion_texto(mejores[a].ecuacion,
+                                           sizeof(mejores[a].ecuacion),
+                                           res.familia_nombre, res.params, res.num_params);
+                }
+                print_step("  MEJOR para %s: %s (error = %.6e)", archivos_datos[a].filename,
+                           mejores[a].best_familia, mejores[a].best_error);
+                print_step("  ECUACION: %s", mejores[a].ecuacion);
+            }
+
+            double tiempo_total = MPI_Wtime() - tiempo_inicio;
+            print_step("Todas las tareas completadas en %.2f segundos", tiempo_total);
+
+            for (int a = 0; a < num_archivos; a++) {
+                if (mejores[a].best_num_params == 0) continue;
+                Familia *mejor_familia_ptr = NULL;
+                for (int f = 0; f < num_familias; f++) {
+                    if (strcmp(familias[f].nombre, mejores[a].best_familia) == 0) {
+                        mejor_familia_ptr = &familias[f];
+                        break;
+                    }
+                }
+                if (!mejor_familia_ptr || !mejor_familia_ptr->simular) continue;
+
+                int n = archivos_datos[a].n;
+                double *x_sim = (double*)malloc(n * sizeof(double));
+                mejor_familia_ptr->simular(mejores[a].best_params,
+                                           archivos_datos[a].t,
+                                           archivos_datos[a].F,
+                                           n, x_sim);
+
+                char **nombres_familias = (char**)malloc(num_familias * sizeof(char*));
+                for (int f = 0; f < num_familias; f++) {
+                    nombres_familias[f] = familias[f].nombre;
+                }
+
+                guardar_resultados_json_completo(
+                    json_dir,
+                    archivos_datos[a].filename,
+                    mejores[a].best_familia,
+                    mejores[a].best_params,
+                    mejores[a].best_num_params,
+                    mejores[a].best_error,
+                    mejores[a].ecuacion,
+                    archivos_datos[a].t,
+                    archivos_datos[a].x,
+                    x_sim,
+                    n,
+                    config.maxiter,
+                    config.popsize,
+                    nombres_familias,
+                    errores_por_archivo[a],
+                    num_familias
+                );
+                print_step("JSON guardado para %s", archivos_datos[a].filename);
+                free(x_sim);
+                free(nombres_familias);
+            }
+
+            for (int a = 0; a < num_archivos; a++) {
+                free(archivos_datos[a].t);
+                free(archivos_datos[a].x);
+                free(archivos_datos[a].F);
+                free(errores_por_archivo[a]);
+            }
+            free(archivos_datos);
+            free(errores_por_archivo);
+            free(mejores);
+
+            print_step("=== EJECUCION FINALIZADA (MAESTRO) ===");
+            print_step("Resultados guardados en: %s", output_dir);
+        }
+        else {
+            // ---- MODO PARALELO ----
+            print_step(">>> EJECUTANDO EN MODO PARALELO (%d PROCESOS) <<<\n", size);
+            
+            int num_workers = size - 1;
+            int archivos_por_worker;
+            int extra;
+            int start = 0;
+
+#if MODO_A
+            // MODO A: El maestro también trabaja
+            archivos_por_worker = num_archivos / size;
+            extra = num_archivos % size;
+            print_step(">>> MODO A: MAESTRO TRABAJADOR <<<");
+#else
+            // MODO B: El maestro es DEDICADO (solo comunica)
+            archivos_por_worker = num_archivos / num_workers;
+            extra = num_archivos % num_workers;
+            print_step(">>> MODO B: MAESTRO DEDICADO (SOLO COMUNICACION) <<<");
+#endif
+
+            double tiempo_inicio = MPI_Wtime();
+
+            // Enviar bloques a los workers
+            for (int w = 1; w < size; w++) {
+                int count = archivos_por_worker + (w <= extra ? 1 : 0);
+                TaskBlock block;
+                block.num_archivos = count;
+                for (int i = 0; i < count; i++) {
+                    strcpy(block.archivos[i], archivos[start + i]);
+                }
+                start += count;
+                MPI_Send(&block, sizeof(TaskBlock), MPI_BYTE, w, 0, MPI_COMM_WORLD);
+                print_step("Bloque enviado al worker %d: %d archivos", w, count);
+            }
+
+            int maestro_count = 0;
+            Result *resultados_maestro = NULL;
+
+#if MODO_A
+            // MODO A: El maestro procesa los archivos restantes
+            maestro_count = num_archivos - start;
+            print_step("Maestro procesa %d archivos", maestro_count);
+            if (maestro_count > 0) {
+                resultados_maestro = (Result*)malloc(maestro_count * sizeof(Result));
+                for (int i = 0; i < maestro_count; i++) {
+                    char path[512];
+                    snprintf(path, sizeof(path), "%s/%s", config.input_dir, archivos[start + i]);
+                    resultados_maestro[i] = procesar_archivo_completo(path, familias, num_familias, config.maxiter, config.popsize);
+                    printf("[Maestro] Procesado: %s (error=%.6e)\n", archivos[start + i], resultados_maestro[i].error);
+                    fflush(stdout);
+                }
+            }
+#else
+            // MODO B: El maestro NO procesa nada, está dedicado a comunicación
+            // Solo envía bloques y espera resultados
+            print_step("Maestro en modo DEDICADO (sin procesamiento)");
+#endif
+
+            // Recibir resultados de los workers
+            int workers_activos = num_workers;
+            while (workers_activos > 0) {
+                MPI_Status status;
+                MPI_Probe(MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &status);
+                int count;
+                MPI_Get_count(&status, MPI_BYTE, &count);
+                Result *res_array = (Result*)malloc(count);
+                MPI_Recv(res_array, count, MPI_BYTE, status.MPI_SOURCE, 1, MPI_COMM_WORLD, &status);
+                int num_res = count / sizeof(Result);
+                
+                for (int i = 0; i < num_res; i++) {
+                    int archivo_idx = -1;
+                    for (int a = 0; a < num_archivos; a++) {
+                        if (strcmp(archivos_datos[a].filename, res_array[i].filename) == 0) {
+                            archivo_idx = a;
+                            break;
+                        }
+                    }
+                    if (archivo_idx == -1) {
+                        print_step("ERROR: Resultado de archivo desconocido: %s", res_array[i].filename);
+                        continue;
+                    }
+                    
+                    if (res_array[i].error < mejores[archivo_idx].best_error) {
+                        mejores[archivo_idx].best_error = res_array[i].error;
+                        mejores[archivo_idx].best_num_params = res_array[i].num_params;
+                        for (int j = 0; j < res_array[i].num_params && j < 30; j++) {
+                            mejores[archivo_idx].best_params[j] = res_array[i].params[j];
+                        }
+                        strcpy(mejores[archivo_idx].best_familia, res_array[i].familia_nombre);
+                        generar_ecuacion_texto(mejores[archivo_idx].ecuacion,
+                                               sizeof(mejores[archivo_idx].ecuacion),
+                                               res_array[i].familia_nombre,
+                                               res_array[i].params,
+                                               res_array[i].num_params);
+                    }
+                }
+                free(res_array);
+                workers_activos--;
+                print_step("Resultados recibidos de un worker. Workers activos restantes: %d", workers_activos);
+            }
+
+#if MODO_A
+            // Incorporar los resultados del maestro (solo en modo A)
+            if (maestro_count > 0) {
+                for (int i = 0; i < maestro_count; i++) {
+                    int archivo_idx = -1;
+                    for (int a = 0; a < num_archivos; a++) {
+                        if (strcmp(archivos_datos[a].filename, resultados_maestro[i].filename) == 0) {
+                            archivo_idx = a;
+                            break;
+                        }
+                    }
+                    if (archivo_idx != -1) {
+                        if (resultados_maestro[i].error < mejores[archivo_idx].best_error) {
+                            mejores[archivo_idx].best_error = resultados_maestro[i].error;
+                            mejores[archivo_idx].best_num_params = resultados_maestro[i].num_params;
+                            for (int j = 0; j < resultados_maestro[i].num_params && j < 30; j++) {
+                                mejores[archivo_idx].best_params[j] = resultados_maestro[i].params[j];
+                            }
+                            strcpy(mejores[archivo_idx].best_familia, resultados_maestro[i].familia_nombre);
+                            generar_ecuacion_texto(mejores[archivo_idx].ecuacion,
+                                                   sizeof(mejores[archivo_idx].ecuacion),
+                                                   resultados_maestro[i].familia_nombre,
+                                                   resultados_maestro[i].params,
+                                                   resultados_maestro[i].num_params);
+                        }
+                    }
+                }
+                free(resultados_maestro);
+            }
+#endif
+
+            // Enviar señal de fin a todos los workers
+            for (int w = 1; w < size; w++) {
+                TaskBlock fin;
+                fin.num_archivos = 0;
+                MPI_Send(&fin, sizeof(TaskBlock), MPI_BYTE, w, 0, MPI_COMM_WORLD);
+                print_step("Señal de fin enviada al worker %d", w);
+            }
+
+            double tiempo_total = MPI_Wtime() - tiempo_inicio;
+            print_step("Todas las tareas completadas en %.2f segundos", tiempo_total);
+
+            print_step("Generando JSON para %d archivos...", num_archivos);
+            for (int a = 0; a < num_archivos; a++) {
+                if (mejores[a].best_num_params == 0) {
+                    print_step("ADVERTENCIA: No se encontró modelo para %s", archivos_datos[a].filename);
+                    continue;
+                }
+                Familia *mejor_familia_ptr = NULL;
+                for (int f = 0; f < num_familias; f++) {
+                    if (strcmp(familias[f].nombre, mejores[a].best_familia) == 0) {
+                        mejor_familia_ptr = &familias[f];
+                        break;
+                    }
+                }
+                if (!mejor_familia_ptr || !mejor_familia_ptr->simular) {
+                    print_step("ADVERTENCIA: No se puede simular para %s", archivos_datos[a].filename);
+                    continue;
+                }
+
+                int n = archivos_datos[a].n;
+                double *x_sim = (double*)malloc(n * sizeof(double));
+                mejor_familia_ptr->simular(mejores[a].best_params,
+                                           archivos_datos[a].t,
+                                           archivos_datos[a].F,
+                                           n, x_sim);
+
+                char **nombres_familias = (char**)malloc(num_familias * sizeof(char*));
+                for (int f = 0; f < num_familias; f++) {
+                    nombres_familias[f] = familias[f].nombre;
+                }
+
+                guardar_resultados_json_completo(
+                    json_dir,
+                    archivos_datos[a].filename,
+                    mejores[a].best_familia,
+                    mejores[a].best_params,
+                    mejores[a].best_num_params,
+                    mejores[a].best_error,
+                    mejores[a].ecuacion,
+                    archivos_datos[a].t,
+                    archivos_datos[a].x,
+                    x_sim,
+                    n,
+                    config.maxiter,
+                    config.popsize,
+                    nombres_familias,
+                    errores_por_archivo[a],
+                    num_familias
+                );
+                print_step("JSON guardado para %s", archivos_datos[a].filename);
+                free(x_sim);
+                free(nombres_familias);
+            }
+
+            for (int a = 0; a < num_archivos; a++) {
+                free(archivos_datos[a].t);
+                free(archivos_datos[a].x);
+                free(archivos_datos[a].F);
+                free(errores_por_archivo[a]);
+            }
+            free(archivos_datos);
+            free(errores_por_archivo);
+            free(mejores);
+
+            print_step("=== EJECUCION FINALIZADA (MAESTRO) ===");
+            print_step("Resultados guardados en: %s", output_dir);
+        }
+    }
+    else {
+        // ---- WORKERS ----
+        while (1) {
+            TaskBlock block;
+            MPI_Recv(&block, sizeof(TaskBlock), MPI_BYTE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (block.num_archivos == 0) break;
+            
+            Result *resultados = (Result*)malloc(block.num_archivos * sizeof(Result));
+            for (int a = 0; a < block.num_archivos; a++) {
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%s", config.input_dir, block.archivos[a]);
+                resultados[a] = procesar_archivo_completo(path, familias, num_familias, config.maxiter, config.popsize);
+                printf("[Worker %d] Procesado: %s (error=%.6e)\n", rank, block.archivos[a], resultados[a].error);
+                fflush(stdout);
+            }
+            MPI_Send(resultados, block.num_archivos * sizeof(Result), MPI_BYTE, 0, 1, MPI_COMM_WORLD);
+            free(resultados);
+        }
+    }
+
+    MPI_Finalize();
+    return 0;
+}
